@@ -1,0 +1,4 @@
+[submodule "vendor/IntrinsicHDR"]
+	path = vendor/IntrinsicHDR
+	url = https://github.com/compphoto/IntrinsicHDR.git
+	ignore = dirty

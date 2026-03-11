@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IntrinsicHDR</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header>
+        <h1>IntrinsicHDR</h1>
+        <p class="subtitle">LDR to HDR</p>
+    </header>
+
+    <main>
+        <!-- Upload Zone -->
+        <section id="upload-section">
+            <div id="drop-zone" class="drop-zone">
+                <div class="drop-zone-content">
+                    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                        <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+                        <polyline points="17 8 12 3 7 8"/>
+                        <line x1="12" y1="3" x2="12" y2="15"/>
+                    </svg>
+                    <p>Drop image here<br><span class="hint">or click to browse (PNG / JPEG)</span></p>
+                </div>
+                <input type="file" id="file-input" accept="image/png,image/jpeg,image/jpg" hidden>
+            </div>
+        </section>
+
+        <!-- Input Info -->
+        <section id="input-info" class="panel hidden">
+            <h2>Input Image</h2>
+            <div class="info-grid">
+                <div class="info-preview">
+                    <img id="input-preview" alt="Input preview">
+                </div>
+                <div class="info-details">
+                    <div class="info-row">
+                        <span id="input-dims"></span>
+                        <span id="input-size"></span>
+                        <span id="input-format"></span>
+                    </div>
+                    <div class="info-row">
+                        <span>Dynamic Range: <strong id="input-dr"></strong></span>
+                        <span>Brightness: <strong id="input-brightness"></strong></span>
+                        <span>Clipping: <strong id="input-clipping"></strong></span>
+                    </div>
+                    <div class="info-row">
+                        <span>Mean Lum (linear): <strong id="input-mean-linear"></strong></span>
+                        <span>Peak Lum (linear): <strong id="input-peak-linear"></strong></span>
+                    </div>
+                    <canvas id="histogram-canvas" width="400" height="120"></canvas>
+                </div>
+            </div>
+        </section>
+
+        <!-- Generation Controls -->
+        <section id="controls" class="panel hidden">
+            <h3>IntrinsicHDR Parameters</h3>
+
+            <div class="controls-group">
+                <div class="controls-row">
+                    <label class="control-label">
+                        Max Resolution: <strong id="maxres-val">4096</strong>
+                        <input type="range" id="maxres-slider" min="256" max="8192" step="256" value="4096">
+                        <span class="control-hint">Longest side limit (higher = more detail, more VRAM)</span>
+                    </label>
+                </div>
+            </div>
+
+            <details class="advanced-params">
+                <summary>Advanced Parameters</summary>
+                <div class="controls-row">
+                    <label class="control-label">
+                        Image Scale: <strong id="imgscale-val">1.0</strong>
+                        <input type="range" id="imgscale-slider" min="0.1" max="5.0" step="0.1" value="1.0">
+                        <span class="control-hint">Scale factor applied to input image</span>
+                    </label>
+                    <label class="control-label">
+                        Processing Scale: <strong id="procscale-val">1.0</strong>
+                        <input type="range" id="procscale-slider" min="0.25" max="2.0" step="0.25" value="1.0">
+                        <span class="control-hint">Internal processing resolution multiplier</span>
+                    </label>
+                </div>
+            </details>
+
+            <div class="controls-row generate-row">
+                <button id="generate-btn" class="btn-primary">Generate HDR</button>
+            </div>
+        </section>
+
+        <!-- Progress -->
+        <section id="progress-section" class="panel hidden">
+            <h2>Generation</h2>
+            <div id="queue-info" class="queue-info hidden">
+                <span id="queue-position-text"></span>
+            </div>
+            <div class="progress-bar-container">
+                <div id="progress-bar" class="progress-bar"></div>
+            </div>
+            <div class="progress-info">
+                <span id="progress-stage"></span>
+                <span id="progress-percent"></span>
+            </div>
+            <div class="progress-actions">
+                <button id="cancel-btn" class="btn-secondary">Cancel</button>
+            </div>
+        </section>
+
+        <!-- Error -->
+        <section id="error-section" class="panel hidden">
+            <div class="error-message">
+                <strong>Error:</strong> <span id="error-text"></span>
+            </div>
+        </section>
+
+        <!-- Result -->
+        <section id="result-section" class="panel hidden">
+            <h2>Result</h2>
+
+            <!-- A/B Comparison -->
+            <div class="compare-container" id="compare-container">
+                <img id="compare-input" class="compare-img" alt="Input">
+                <canvas id="compare-canvas" class="compare-img compare-overlay"></canvas>
+                <div id="compare-slider" class="compare-slider">
+                    <div class="compare-slider-line"></div>
+                    <div class="compare-slider-handle">A|B</div>
+                </div>
+                <div class="compare-labels">
+                    <span class="compare-label-left">SDR</span>
+                    <span class="compare-label-right">HDR</span>
+                </div>
+            </div>
+
+            <h3>Preview</h3>
+            <div class="controls-row">
+                <label class="control-label">
+                    Exposure: <strong id="exposure-val">0.0</strong> EV
+                    <input type="range" id="exposure-slider" min="-5" max="5" step="0.1" value="0">
+                </label>
+                <label class="control-label">
+                    Tonemap:
+                    <select id="tonemap-select">
+                        <option value="aces" selected>ACES Filmic</option>
+                        <option value="reinhard">Reinhard</option>
+                        <option value="linear">Linear (clamp)</option>
+                    </select>
+                </label>
+                <label class="control-label">
+                    Gamma: <strong id="gamma-val">2.4</strong>
+                    <input type="range" id="gamma-slider" min="1.0" max="4.0" step="0.1" value="2.4">
+                </label>
+            </div>
+
+            <div class="result-details">
+                <h3>Luminance comparison (linear)</h3>
+                <table class="compare-table">
+                    <thead>
+                        <tr>
+                            <th></th>
+                            <th>SDR Input</th>
+                            <th>HDR Output</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td class="stat-label">Mean Luminance</td>
+                            <td id="cmp-input-mean">&mdash;</td>
+                            <td id="cmp-output-mean">&mdash;</td>
+                            <td id="cmp-ratio-mean" class="stat-boost">&mdash;</td>
+                        </tr>
+                        <tr>
+                            <td class="stat-label">Peak Luminance</td>
+                            <td id="cmp-input-peak">&mdash;</td>
+                            <td id="cmp-output-peak">&mdash;</td>
+                            <td id="cmp-ratio-peak" class="stat-boost">&mdash;</td>
+                        </tr>
+                        <tr>
+                            <td class="stat-label">Contrast (P99.9/P0.1)</td>
+                            <td id="cmp-input-contrast">&mdash;</td>
+                            <td id="cmp-output-contrast">&mdash;</td>
+                            <td id="cmp-ratio-contrast" class="stat-boost">&mdash;</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <h3>HDR output</h3>
+                <div class="stat-grid">
+                    <div class="stat-row">
+                        <span class="stat-label">Dynamic Range</span>
+                        <span class="stat-value" id="result-dr"></span>
+                    </div>
+                    <div class="stat-row">
+                        <span class="stat-label">P50 / P90 / P99</span>
+                        <span class="stat-value" id="result-percentiles"></span>
+                    </div>
+                    <div class="stat-row">
+                        <span class="stat-label">Processing Time</span>
+                        <span class="stat-value" id="result-time"></span>
+                    </div>
+                </div>
+                <canvas id="hdr-histogram-canvas" width="400" height="120"></canvas>
+                <div class="download-buttons">
+                    <a id="download-exr" class="btn-primary" download>Download EXR</a>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <script src="app.js"></script>
+</body>
+</html>
