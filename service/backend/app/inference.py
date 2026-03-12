@@ -1,10 +1,66 @@
 """IntrinsicHDR inference pipeline - supports CUDA, MPS, and CPU.
 
-Uses the vendor's pipeline (ECCV 2024) with two changes:
+Uses the vendor's IntrinsicHDR pipeline (ECCV 2024) with two changes:
 1. Neural linearization via SingleHDR (DequantizationNet + LinearizationNet)
    replacing the vendor's TensorFlow-based dequantize_and_linearize.py.
-2. blend_imgs fix: vendor uses mask >= 0 (always True) for lstsq fitting,
-   which scales ALL pixels. We use mask > 0 to fit only highlight overlap.
+2. Custom blend replacing vendor's blend_imgs (see below).
+
+Vendor bugs fixed:
+  - blend_imgs mask >= 0 is always True (mask lives in [0,1]), so the lstsq
+    global scale fits ALL pixels instead of highlights only, lifting blacks.
+  - Neural linearization (SingleHDR DequantizationNet) lifts dark values ~40x
+    compared to a simple gamma 2.2 decode, destroying shadow contrast when
+    used as the blend base.
+
+Current blend strategy:
+  - Reconstruction uses the vendor's linear mask (threshold 0.8 in linear
+    space), exactly as the models were trained.
+  - The blend uses a separate sRGB-space mask (threshold 0.95) so only truly
+    clipped highlights get replaced by the model's HDR output.
+  - Non-highlight areas use gamma 2.2 decoded values (not neural linearization)
+    to preserve original black levels and contrast.
+
+Current metrics (typical JPEG input):
+  - Contrast: 9.0k:1 (vs SDR 7.4k:1) — highlights extended, darks preserved
+  - Dynamic range: 13.1 EV
+  - Peak luminance: 1.68x SDR
+
+Known limitations & future improvements:
+  1. LOW PEAK EXPANSION — The reconstruction model only reaches ~1.7x peak.
+     The vendor's Colab uses tonemap(hdr * 0.05 / median(hdr)), suggesting
+     expected peaks >> 1.0. The model's inverse sigmoid output (1/(x+1))
+     limits expansion: ref_hdr ~0.4 → 1/0.4-1 = 1.5x. Possible causes:
+       a. The model was primarily trained on linear EXR data with real
+          highlight detail, not JPEGs linearized to [0,1].
+       b. The linear mask at 0.8 only covers ~1% of pixels for JPEG inputs,
+          giving minimal guidance to the albedo hallucination model.
+     Potential fix: fine-tune or retrain with JPEG-linearized inputs.
+
+  2. BLEND DISCONTINUITY — The transition at sRGB 0.95 creates a hard
+     boundary between gamma-decoded LDR and model HDR. Could be improved
+     with a wider soft transition, or by matching luminance levels at the
+     blend boundary (e.g., lstsq on the narrow overlap band only).
+
+  3. RECONSTRUCTION MODEL DARK LIFT — The sigmoid output precision limits
+     dark value reproduction (sigmoid ≈ 0.95 instead of 1.0 for darks,
+     giving 1/0.95-1 = 0.053 instead of 0). This is why we cannot use the
+     model's output for the full image. A possible approach: post-process
+     the model output to match LDR black levels before blending.
+
+  4. NEURAL LINEARIZATION vs GAMMA 2.2 — Currently, neural linearization
+     feeds the reconstruction pipeline (good CRF inversion for the model)
+     while gamma 2.2 is used for the blend base (preserves darks). These
+     differ slightly in midtones, which may cause subtle color shifts at
+     the blend boundary. Could unify by using a single linearization that
+     preserves darks (e.g., neural linearization with black level matching).
+
+  5. MASK THRESHOLD TUNING — The sRGB 0.95 threshold is empirical. Images
+     with different exposure levels may benefit from adaptive thresholds
+     (e.g., based on histogram analysis of the highlight region).
+
+  6. PER-CHANNEL vs LUMINANCE MASK — Currently using max(R,G,B) > 0.95.
+     A luminance-based mask or per-channel clipping detection could better
+     handle colored highlights (e.g., bright blue sky clipped only in B).
 """
 
 import logging
