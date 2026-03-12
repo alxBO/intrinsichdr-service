@@ -46,10 +46,11 @@ def analyze_sdr(img_bytes: bytes, file_size: int, filename: str) -> dict:
     else:
         contrast_ratio = 0.0
 
-    # Dynamic range in EV (from non-zero luminance values)
-    positive_gray = gray[gray > 0]
-    if positive_gray.size > 0:
-        dynamic_range_ev = float(np.log2(positive_gray.max() / positive_gray.min()))
+    # Dynamic range in EV (from linear luminance, consistent with HDR analysis)
+    if positive_lum.size > 0:
+        lum_low = float(np.percentile(positive_lum, 0.1))
+        lum_high = float(np.percentile(positive_lum, 99.9))
+        dynamic_range_ev = float(np.log2(lum_high / lum_low)) if lum_low > 0 else 0.0
     else:
         dynamic_range_ev = 0.0
 
