@@ -77,6 +77,7 @@ function displayInputInfo(data) {
     $('#input-peak-linear').textContent = data.peak_luminance_linear.toFixed(4);
 
     inputLinearMetrics = {
+        min: data.min_luminance_linear,
         mean: data.mean_luminance_linear,
         peak: data.peak_luminance_linear,
         contrast: data.contrast_ratio,
@@ -273,6 +274,11 @@ function displayResult(data) {
 
     const inM = inputLinearMetrics;
     if (inM) {
+        $('#cmp-input-min').textContent = (inM.min || 0).toFixed(6);
+        $('#cmp-output-min').textContent = (a.min_luminance || 0).toFixed(6);
+        const ratioMin = inM.min > 0 ? (a.min_luminance || 0) / inM.min : 0;
+        $('#cmp-ratio-min').textContent = ratioMin.toFixed(2) + 'x';
+
         $('#cmp-input-mean').textContent = inM.mean.toFixed(4);
         $('#cmp-output-mean').textContent = a.mean_luminance.toFixed(4);
         const ratioMean = inM.mean > 0 ? a.mean_luminance / inM.mean : 0;
@@ -288,6 +294,9 @@ function displayResult(data) {
         const ratioContrast = inM.contrast > 0 ? a.contrast_ratio / inM.contrast : 0;
         $('#cmp-ratio-contrast').textContent = ratioContrast.toFixed(1) + 'x';
     } else {
+        $('#cmp-input-min').textContent = '\u2014';
+        $('#cmp-output-min').textContent = (a.min_luminance || 0).toFixed(6);
+        $('#cmp-ratio-min').textContent = '\u2014';
         $('#cmp-input-mean').textContent = '\u2014';
         $('#cmp-output-mean').textContent = a.mean_luminance.toFixed(4);
         $('#cmp-ratio-mean').textContent = '\u2014';
