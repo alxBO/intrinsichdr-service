@@ -9,6 +9,7 @@ let evtSource = null;
 let hdrData = null;
 let inputLocalUrl = null;
 let inputLinearMetrics = null;
+let sdrLinearData = null;
 
 // --- Drop Zone ---
 const dropZone = $('#drop-zone');
@@ -38,6 +39,7 @@ async function handleFile(file) {
     hide($('#error-section'));
     hide($('#progress-section'));
     hdrData = null;
+    sdrLinearData = null;
     if (evtSource) { evtSource.close(); evtSource = null; }
 
     if (inputLocalUrl) URL.revokeObjectURL(inputLocalUrl);
@@ -103,6 +105,9 @@ $('#gamma-slider').addEventListener('input', (e) => {
     applyClientTonemap();
 });
 $('#tonemap-select').addEventListener('change', () => {
+    applyClientTonemap();
+});
+$('#sdr-exposure-toggle').addEventListener('change', () => {
     applyClientTonemap();
 });
 
@@ -245,6 +250,7 @@ async function loadResult(jobId) {
 
         displayResult(data);
         await loadHdrData(jobId);
+        loadSdrLinearData();
 
         hide($('#progress-section'));
         $('#generate-btn').disabled = false;
@@ -312,6 +318,42 @@ function formatContrast(ratio) {
     return ratio.toFixed(0) + ':1';
 }
 
+// --- SDR Linear Data ---
+function loadSdrLinearData() {
+    if (!inputLocalUrl) return;
+    const img = new Image();
+    img.onload = () => {
+        let w = img.naturalWidth;
+        let h = img.naturalHeight;
+
+        // Cap at 1024 to match HDR preview dimensions
+        const maxDim = 1024;
+        if (Math.max(w, h) > maxDim) {
+            const scale = maxDim / Math.max(w, h);
+            w = Math.round(w * scale);
+            h = Math.round(h * scale);
+        }
+
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, w, h);
+        const imageData = ctx.getImageData(0, 0, w, h);
+
+        const pixels = new Float32Array(w * h * 3);
+        for (let i = 0; i < w * h; i++) {
+            // sRGB to linear via gamma 2.2 (matches backend)
+            pixels[i * 3] = Math.pow(imageData.data[i * 4] / 255, 2.2);
+            pixels[i * 3 + 1] = Math.pow(imageData.data[i * 4 + 1] / 255, 2.2);
+            pixels[i * 3 + 2] = Math.pow(imageData.data[i * 4 + 2] / 255, 2.2);
+        }
+
+        sdrLinearData = { width: w, height: h, pixels };
+    };
+    img.src = inputLocalUrl;
+}
+
 // --- Client-side Tone Mapping ---
 async function loadHdrData(jobId) {
     try {
@@ -331,35 +373,20 @@ async function loadHdrData(jobId) {
     }
 }
 
-function applyClientTonemap() {
-    if (!hdrData) return;
+function renderLinearToCanvas(canvas, data, exposureMul, tonemap, gamma, displayW, displayH) {
+    const { width: srcW, height: srcH, pixels } = data;
 
-    const { width: hdrW, height: hdrH, pixels } = hdrData;
-    const exposure = parseFloat($('#exposure-slider').value);
-    const tonemap = $('#tonemap-select').value;
-    const gamma = parseFloat($('#gamma-slider').value);
-    const exposureMul = Math.pow(2, exposure);
-
-    const canvas = $('#compare-canvas');
-    const compareImg = $('#compare-input');
-
-    // Match canvas to input image size so A/B overlay aligns
-    const displayW = compareImg.naturalWidth || hdrW;
-    const displayH = compareImg.naturalHeight || hdrH;
     canvas.width = displayW;
     canvas.height = displayH;
 
-    const ctx = canvas.getContext('2d');
-
-    // Tonemap at native HDR resolution into offscreen canvas
     const offscreen = document.createElement('canvas');
-    offscreen.width = hdrW;
-    offscreen.height = hdrH;
+    offscreen.width = srcW;
+    offscreen.height = srcH;
     const offCtx = offscreen.getContext('2d');
-    const imgData = offCtx.createImageData(hdrW, hdrH);
+    const imgData = offCtx.createImageData(srcW, srcH);
     const out = imgData.data;
 
-    for (let i = 0; i < hdrW * hdrH; i++) {
+    for (let i = 0; i < srcW * srcH; i++) {
         let r = Math.max(0, pixels[i * 3]) * exposureMul;
         let g = Math.max(0, pixels[i * 3 + 1]) * exposureMul;
         let b = Math.max(0, pixels[i * 3 + 2]) * exposureMul;
@@ -391,10 +418,35 @@ function applyClientTonemap() {
 
     offCtx.putImageData(imgData, 0, 0);
 
-    // Scale tonemapped HDR to match input image dimensions
+    const ctx = canvas.getContext('2d');
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(offscreen, 0, 0, displayW, displayH);
+}
+
+function applyClientTonemap() {
+    if (!hdrData) return;
+
+    const exposure = parseFloat($('#exposure-slider').value);
+    const tonemap = $('#tonemap-select').value;
+    const gamma = parseFloat($('#gamma-slider').value);
+    const exposureMul = Math.pow(2, exposure);
+
+    const compareImg = $('#compare-input');
+    const displayW = compareImg.naturalWidth || hdrData.width;
+    const displayH = compareImg.naturalHeight || hdrData.height;
+
+    // Render HDR
+    renderLinearToCanvas($('#compare-canvas'), hdrData, exposureMul, tonemap, gamma, displayW, displayH);
+
+    // Render SDR with same exposure if toggle is on
+    const sdrCanvas = $('#compare-sdr-canvas');
+    if ($('#sdr-exposure-toggle').checked && sdrLinearData) {
+        sdrCanvas.classList.add('active');
+        renderLinearToCanvas(sdrCanvas, sdrLinearData, exposureMul, tonemap, gamma, displayW, displayH);
+    } else {
+        sdrCanvas.classList.remove('active');
+    }
 }
 
 function tonemapAces(x) {

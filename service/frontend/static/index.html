@@ -122,6 +122,7 @@
             <!-- A/B Comparison -->
             <div class="compare-container" id="compare-container">
                 <img id="compare-input" class="compare-img" alt="Input">
+                <canvas id="compare-sdr-canvas" class="compare-img compare-sdr"></canvas>
                 <canvas id="compare-canvas" class="compare-img compare-overlay"></canvas>
                 <div id="compare-slider" class="compare-slider">
                     <div class="compare-slider-line"></div>
@@ -150,6 +151,13 @@
                 <label class="control-label">
                     Gamma: <strong id="gamma-val">2.4</strong>
                     <input type="range" id="gamma-slider" min="1.0" max="4.0" step="0.1" value="2.4">
+                </label>
+                <label class="control-label toggle-label">
+                    <span class="toggle-switch">
+                        <input type="checkbox" id="sdr-exposure-toggle">
+                        <span class="toggle-track"></span>
+                    </span>
+                    Apply exposure to SDR
                 </label>
             </div>
 
