@@ -3,7 +3,7 @@
 Uses the vendor's IntrinsicHDR pipeline (ECCV 2024) with two changes:
 1. Neural linearization via SingleHDR (DequantizationNet + LinearizationNet)
    replacing the vendor's TensorFlow-based dequantize_and_linearize.py.
-2. Custom blend replacing vendor's blend_imgs (see below).
+2. Custom post-processing pipeline replacing vendor's blend_imgs (see below).
 
 Vendor bugs fixed:
   - blend_imgs mask >= 0 is always True (mask lives in [0,1]), so the lstsq
@@ -12,55 +12,35 @@ Vendor bugs fixed:
     compared to a simple gamma 2.2 decode, destroying shadow contrast when
     used as the blend base.
 
-Current blend strategy:
-  - Reconstruction uses the vendor's linear mask (threshold 0.8 in linear
-    space), exactly as the models were trained.
-  - The blend uses a separate sRGB-space mask (threshold 0.95) so only truly
-    clipped highlights get replaced by the model's HDR output.
-  - Non-highlight areas use gamma 2.2 decoded values (not neural linearization)
-    to preserve original black levels and contrast.
+Post-processing pipeline (after vendor reconstruction):
+  1. DARK LIFT CORRECTION — The inverse sigmoid output has a ~0.053 dark floor
+     (sigmoid ≈ 0.95 instead of 1.0). We estimate and subtract this per-channel
+     offset using the 5th percentile of known-dark pixels (sRGB < 0.10).
 
-Current metrics (typical JPEG input):
-  - Contrast: 9.0k:1 (vs SDR 7.4k:1) — highlights extended, darks preserved
-  - Dynamic range: 13.1 EV
-  - Peak luminance: 1.68x SDR
+  2. ADAPTIVE PER-CHANNEL BLEND MASK — Threshold adapts to highlight density:
+     >15% bright pixels → 0.88, >5% → 0.92, <0.5% → 0.98, else 0.95.
+     Each channel blends independently (handles colored clipping, e.g.,
+     blue sky clipped only in B channel).
 
-Known limitations & future improvements:
-  1. LOW PEAK EXPANSION — The reconstruction model only reaches ~1.7x peak.
-     The vendor's Colab uses tonemap(hdr * 0.05 / median(hdr)), suggesting
-     expected peaks >> 1.0. The model's inverse sigmoid output (1/(x+1))
-     limits expansion: ref_hdr ~0.4 → 1/0.4-1 = 1.5x. Possible causes:
-       a. The model was primarily trained on linear EXR data with real
-          highlight detail, not JPEGs linearized to [0,1].
-       b. The linear mask at 0.8 only covers ~1% of pixels for JPEG inputs,
-          giving minimal guidance to the albedo hallucination model.
-     Potential fix: fine-tune or retrain with JPEG-linearized inputs.
+  3. UNIFIED LINEARIZATION — Blend base transitions from gamma 2.2 (darks,
+     sRGB < 0.50) to neural linearization (near-highlights, sRGB > 0.85).
+     Gamma 2.2 preserves true black levels; neural CRF inversion is more
+     accurate for bright regions near the blend threshold.
 
-  2. BLEND DISCONTINUITY — The transition at sRGB 0.95 creates a hard
-     boundary between gamma-decoded LDR and model HDR. Could be improved
-     with a wider soft transition, or by matching luminance levels at the
-     blend boundary (e.g., lstsq on the narrow overlap band only).
+  4. LUMINANCE MATCHING — Per-channel lstsq on a narrow overlap band (10%
+     below threshold) ensures continuity between HDR and LDR at the blend
+     boundary. Scale factors clamped to [0.5, 2.0] for stability.
 
-  3. RECONSTRUCTION MODEL DARK LIFT — The sigmoid output precision limits
-     dark value reproduction (sigmoid ≈ 0.95 instead of 1.0 for darks,
-     giving 1/0.95-1 = 0.053 instead of 0). This is why we cannot use the
-     model's output for the full image. A possible approach: post-process
-     the model output to match LDR black levels before blending.
+  5. PEAK EXPANSION — Gain curve in highlight region: at mask=0, no change;
+     at mask=1, values multiplied by 2x. Pushes peaks from ~1.7x to ~3.4x SDR.
 
-  4. NEURAL LINEARIZATION vs GAMMA 2.2 — Currently, neural linearization
-     feeds the reconstruction pipeline (good CRF inversion for the model)
-     while gamma 2.2 is used for the blend base (preserves darks). These
-     differ slightly in midtones, which may cause subtle color shifts at
-     the blend boundary. Could unify by using a single linearization that
-     preserves darks (e.g., neural linearization with black level matching).
-
-  5. MASK THRESHOLD TUNING — The sRGB 0.95 threshold is empirical. Images
-     with different exposure levels may benefit from adaptive thresholds
-     (e.g., based on histogram analysis of the highlight region).
-
-  6. PER-CHANNEL vs LUMINANCE MASK — Currently using max(R,G,B) > 0.95.
-     A luminance-based mask or per-channel clipping detection could better
-     handle colored highlights (e.g., bright blue sky clipped only in B).
+Remaining limitations:
+  - The reconstruction model's peak expansion is fundamentally limited by the
+    inverse sigmoid output space and JPEG-linearized inputs (vs the EXR data
+    it was trained on). The 2x gain expansion is a post-hoc workaround;
+    retraining with JPEG-linearized inputs would be the proper fix.
+  - The linear mask at 0.8 only covers ~1% of pixels for JPEG inputs, giving
+    minimal guidance to the albedo hallucination model.
 """
 
 import logging
@@ -208,19 +188,115 @@ class IntrinsicHDRPipeline:
 
         return np.clip(linear, 0, None).astype(np.float32)
 
-    def _blend_direct(self, ldr, hdr, mask):
-        """Blend LDR and HDR using mask — no lstsq scaling.
+    def _correct_dark_lift(self, hdr, ldr_srgb):
+        """Fix reconstruction model's sigmoid dark floor.
 
-        Where mask == 0: use original LDR (preserves blacks/midtones exactly).
-        Where mask > 0: soft blend towards reconstructed HDR highlights.
-        No global scaling, so dark values are never lifted.
+        The inverse sigmoid output has ~0.053 dark floor (sigmoid ≈ 0.95
+        instead of 1.0 for darks). Estimate and subtract using known-dark pixels.
         """
-        mask_pct = 100.0 * (mask > 0.01).mean()
-        logger.info("blend: mask coverage=%.1f%%, max=%.4f", mask_pct, mask.max())
+        srgb_max = ldr_srgb.max(axis=-1)
+        dark_mask = srgb_max < 0.10
+        n_dark = dark_mask.sum()
 
-        blended = mask[:, :, np.newaxis] * hdr + (1 - mask[:, :, np.newaxis]) * ldr
+        if n_dark < 100:
+            return hdr
 
-        return blended
+        dark_offset = np.zeros(3, dtype=np.float32)
+        for c in range(3):
+            dark_offset[c] = np.percentile(hdr[:, :, c][dark_mask], 5)
+
+        corrected = hdr - dark_offset[np.newaxis, np.newaxis, :]
+        logger.info(
+            "dark lift correction: offset=[%.4f, %.4f, %.4f], %d dark pixels",
+            dark_offset[0], dark_offset[1], dark_offset[2], n_dark,
+        )
+        return np.maximum(corrected, 0).astype(np.float32)
+
+    def _compute_blend_mask(self, ldr_srgb):
+        """Compute adaptive per-channel blend mask.
+
+        Per-channel: each channel blends independently based on its own
+        clipping level, handling colored highlights (e.g., blue sky clipped in B).
+        Adaptive threshold: adjusts based on highlight distribution.
+        """
+        srgb_max = ldr_srgb.max(axis=-1)
+        highlight_pct = (srgb_max > 0.90).mean()
+
+        if highlight_pct > 0.15:
+            threshold = 0.88
+        elif highlight_pct > 0.05:
+            threshold = 0.92
+        elif highlight_pct < 0.005:
+            threshold = 0.98
+        else:
+            threshold = 0.95
+
+        width = max(1.0 - threshold, 0.02)
+
+        # Per-channel mask: each channel gets its own blend weight
+        channel_mask = np.clip((ldr_srgb - threshold) / width, 0, 1).astype(np.float32)
+
+        pct = 100.0 * (channel_mask.max(axis=-1) > 0.01).mean()
+        logger.info(
+            "adaptive mask: highlight_pct=%.1f%%, threshold=%.2f, coverage=%.1f%%",
+            100 * highlight_pct, threshold, pct,
+        )
+
+        return channel_mask, threshold
+
+    def _match_luminance_at_boundary(self, hdr, ldr_base, ldr_srgb, threshold):
+        """Match HDR luminance to LDR at the blend boundary.
+
+        Uses lstsq on a narrow overlap band just below the blend threshold
+        to find per-channel scales ensuring continuity at the transition.
+        """
+        srgb_max = ldr_srgb.max(axis=-1)
+        band_lo = max(threshold - 0.10, 0.0)
+        overlap = (srgb_max > band_lo) & (srgb_max < threshold)
+        n_overlap = overlap.sum()
+
+        if n_overlap < 100:
+            logger.info("luminance match: only %d overlap pixels, skipping", n_overlap)
+            return hdr
+
+        matched = hdr.copy()
+        scales = []
+        for c in range(3):
+            hdr_vals = hdr[:, :, c][overlap].reshape(-1, 1)
+            ldr_vals = ldr_base[:, :, c][overlap].reshape(-1, 1)
+
+            if hdr_vals.mean() < 1e-6:
+                scales.append(1.0)
+                continue
+
+            scale = np.linalg.lstsq(hdr_vals, ldr_vals, rcond=None)[0][0, 0]
+            scale = np.clip(scale, 0.5, 2.0)  # safety bounds
+            matched[:, :, c] *= scale
+            scales.append(float(scale))
+
+        logger.info(
+            "luminance match: scales=[%.3f, %.3f, %.3f], %d overlap pixels",
+            scales[0], scales[1], scales[2], n_overlap,
+        )
+        return matched.astype(np.float32)
+
+    def _expand_peaks(self, hdr, channel_mask, expansion=2.0):
+        """Boost HDR peaks beyond model's ~1.7x sigmoid limit.
+
+        Applies gain to highlight regions scaled by mask strength.
+        At mask=0: no change. At mask=1: values multiplied by expansion factor.
+        """
+        mask_max = channel_mask.max(axis=-1)
+        active = (mask_max > 0.1).sum()
+
+        if active < 10:
+            return hdr
+
+        gain = 1.0 + (expansion - 1.0) * channel_mask
+        expanded = hdr * gain
+
+        logger.info("peak expansion: factor=%.1fx, active_pixels=%d", expansion, active)
+        return expanded.astype(np.float32)
 
     @torch.no_grad()
     def run(self, img_bytes: bytes, progress_cb: ProgressCallback = None,
@@ -310,26 +386,35 @@ class IntrinsicHDRPipeline:
             # Resize to original resolution
             hdr_r = cv2.resize(hdr_raw, (w_in, h_in), interpolation=cv2.INTER_CUBIC)
 
-            # sRGB blend mask: tight threshold on near-clipped pixels only.
-            # Only blend in HDR where pixels are truly clipped (sRGB >= 0.95),
-            # with a narrow transition 0.95→1.0. This avoids reducing brightness
-            # of moderately bright pixels where the model output < original.
-            srgb_max = ldr_srgb.max(axis=-1)  # max channel per pixel
-            bl_mask = np.clip((srgb_max - 0.95) / 0.05, 0, 1)
+            # --- Post-processing pipeline ---
+
+            # #3: Dark lift correction — fix model's sigmoid dark floor
+            hdr_r = self._correct_dark_lift(hdr_r, ldr_srgb)
+
+            # #5 + #6: Adaptive per-channel blend mask
+            channel_mask, threshold = self._compute_blend_mask(ldr_srgb)
+
+            # #4: Unified linearization — neural for near-highlights (better CRF
+            # inversion), gamma 2.2 for darks (preserves black levels)
+            srgb_linear = np.power(ldr_srgb, 2.2).astype(np.float32)
+            bright_w = np.clip(
+                (ldr_srgb.max(axis=-1) - 0.5) / 0.35, 0, 1,
+            )[:, :, np.newaxis]
+            blend_base = (bright_w * ldr_c + (1 - bright_w) * srgb_linear).astype(np.float32)
 
             logger.info(
-                "sRGB blend mask: coverage=%.1f%% (linear mask was %.1f%%)",
-                100.0 * (bl_mask > 0.01).mean(),
-                100.0 * (blend_mask > 0.01).mean(),
+                "unified linearization: neural weight range=[%.2f, %.2f]",
+                bright_w.min(), bright_w.max(),
             )
 
-            # Gamma 2.2 decode — matches frontend's SDR→linear conversion
-            # (proper sRGB has a linear segment below 0.04045 that lifts darks ~12x
-            # vs gamma 2.2, destroying contrast in the comparison metrics)
-            srgb_linear = np.power(ldr_srgb, 2.2).astype(np.float32)
+            # #2: Match HDR luminance to blend base at transition boundary
+            hdr_r = self._match_luminance_at_boundary(hdr_r, blend_base, ldr_srgb, threshold)
 
-            # Direct blend: sRGB-decoded darks (true blacks) + HDR highlights
-            hdr_out = self._blend_direct(srgb_linear, hdr_r, bl_mask)
+            # #1: Peak expansion — boost highlights beyond sigmoid limit
+            hdr_r = self._expand_peaks(hdr_r, channel_mask)
+
+            # Per-channel blend: each channel blends independently
+            hdr_out = channel_mask * hdr_r + (1 - channel_mask) * blend_base
 
             logger.info(
                 "After blend: range=[%.4f, %.4f], mean=%.4f",
