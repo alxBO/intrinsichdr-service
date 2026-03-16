@@ -21,16 +21,20 @@ TMUX_SESSION="intrinsichdr"
 if [ $# -lt 1 ]; then
     echo "Usage: $0 <user@host> [ssh-options...]"
     echo "  e.g. $0 root@203.0.113.5 -p 12345"
+    echo "  e.g. $0 root@203.0.113.5 -p 12345 -i ~/.ssh/vastai_key"
     exit 1
 fi
 
 SSH_ARGS=("$@")
 
+# Vast.ai instances are ephemeral — skip host key checks
+SSH_OPTS=(-o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
+
 echo "=== Remote Deploy: $SERVICE_NAME ==="
 echo "Target: ${SSH_ARGS[0]}"
 echo ""
 
-ssh -o ConnectTimeout=10 "${SSH_ARGS[@]}" bash -s <<REMOTE
+ssh "${SSH_OPTS[@]}" "${SSH_ARGS[@]}" bash -s <<REMOTE
 set -e
 
 SERVICE="$SERVICE_NAME"

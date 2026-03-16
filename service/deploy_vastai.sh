@@ -57,7 +57,7 @@ if [ ! -f "$WEIGHTS_DIR/dequantization.pt" ] || [ ! -f "$WEIGHTS_DIR/linearizati
 
     # Convert only dequantization + linearization (not hallucination/refinement)
     cd "$SCRIPT_DIR/backend"
-    python convert_linearization_weights.py \
+    python3 convert_linearization_weights.py \
         --ckpt_deq "$CKPT_ROOT/ckpt_deq/model.ckpt" \
         --ckpt_lin "$CKPT_ROOT/ckpt_lin/model.ckpt" \
         --output_dir "$WEIGHTS_DIR"

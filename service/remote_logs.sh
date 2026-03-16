@@ -30,26 +30,29 @@ done
 
 if [ ${#SSH_ARGS[@]} -lt 1 ]; then
     echo "Usage: $0 <user@host> [ssh-options...] [--tail N | --dump | --attach]"
+    echo "  e.g. $0 root@203.0.113.5 -p 12345 -i ~/.ssh/vastai_key"
     exit 1
 fi
 
+# Vast.ai instances are ephemeral — skip host key checks
+SSH_OPTS=(-o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
 LOG="/tmp/deploy_${SERVICE_NAME}.log"
 
 case "$MODE" in
     attach)
         echo "Attaching to tmux session '$TMUX_SESSION'... (detach with Ctrl-B D)"
-        ssh -o ConnectTimeout=10 -t "${SSH_ARGS[@]}" "tmux attach -t $TMUX_SESSION"
+        ssh "${SSH_OPTS[@]}" -t "${SSH_ARGS[@]}" "tmux attach -t $TMUX_SESSION"
         ;;
     dump)
-        ssh -o ConnectTimeout=10 "${SSH_ARGS[@]}" "cat $LOG 2>/dev/null || echo 'No log file found.'"
+        ssh "${SSH_OPTS[@]}" "${SSH_ARGS[@]}" "cat $LOG 2>/dev/null || echo 'No log file found.'"
         ;;
     follow)
         if [ "$TAIL_LINES" -gt 0 ] 2>/dev/null; then
             echo "=== Last $TAIL_LINES lines + live follow (Ctrl-C to stop) ==="
-            ssh -o ConnectTimeout=10 "${SSH_ARGS[@]}" "tail -n $TAIL_LINES -f $LOG 2>/dev/null || echo 'No log file found.'"
+            ssh "${SSH_OPTS[@]}" "${SSH_ARGS[@]}" "tail -n $TAIL_LINES -f $LOG 2>/dev/null || echo 'No log file found.'"
         else
             echo "=== Live logs (Ctrl-C to stop) ==="
-            ssh -o ConnectTimeout=10 "${SSH_ARGS[@]}" "tail -f $LOG 2>/dev/null || echo 'No log file found.'"
+            ssh "${SSH_OPTS[@]}" "${SSH_ARGS[@]}" "tail -f $LOG 2>/dev/null || echo 'No log file found.'"
         fi
         ;;
 esac
