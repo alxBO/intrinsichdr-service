@@ -47,9 +47,11 @@ if [ ! -f "$WEIGHTS_DIR/dequantization.pt" ] || [ ! -f "$WEIGHTS_DIR/linearizati
     pip install -q gdown tensorflow-cpu
 
     # Download SingleHDR checkpoints from Google Drive
-    gdown --id 1e9vP8YPEjGcvXCa0Bfqwxw7qks7dH-VE -O /tmp/ckpt.zip
-    unzip -q -o /tmp/ckpt.zip -d /tmp/ckpt_raw
-    rm /tmp/ckpt.zip
+    mkdir -p /tmp/ckpt_dl
+    cd /tmp/ckpt_dl
+    gdown --id 1e9vP8YPEjGcvXCa0Bfqwxw7qks7dH-VE
+    unzip -q -o /tmp/ckpt_dl/*.zip -d /tmp/ckpt_raw
+    rm -rf /tmp/ckpt_dl
 
     # Find the checkpoint root (handles nested or flat zip structures)
     CKPT_ROOT=$(find /tmp/ckpt_raw -name "ckpt_deq" -type d -print -quit | xargs dirname)
